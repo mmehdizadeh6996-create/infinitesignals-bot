@@ -17,6 +17,9 @@ os.environ["DATABASE_URL"] = _clean_dsn(os.environ.get("DATABASE_URL", ""))
 from aiohttp import web  # noqa: E402
 
 import bot  # noqa: E402
+import dashboard  # noqa: E402
+
+bot.dp.include_router(dashboard.router)  # admin-only /dashboard, /users, /user
 
 
 async def health(_request):
