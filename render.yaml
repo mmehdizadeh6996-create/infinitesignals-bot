@@ -1,14 +1,17 @@
 services:
-  - type: worker
+  - type: web
     name: infinitesignals-bot
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: python main.py
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
       - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
         sync: false
       - key: ADMIN_IDS
         sync: false
@@ -22,11 +25,3 @@ services:
         value: "499"
       - key: PRICE_12M
         value: "999"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: infinitesignals-db
-          property: connectionString
-
-databases:
-  - name: infinitesignals-db
-    plan: basic-256mb
