@@ -13,6 +13,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 import analysis
 import db
 import payments
+import tracking
 from config import (ADMIN_IDS, BOT_TOKEN, MAX_DAILY_SIGNALS, MIN_SCORE, PAYMENT_TTL_MIN, PLANS,
                     SCAN_INTERVAL, SIGNAL_MAX_AGE_HOURS, SYMBOL_COOLDOWN_HOURS, SYMBOLS,
                     TRIAL_DAYS, WALLET)
@@ -42,10 +43,13 @@ def f(p):
 
 def signal_text(s) -> str:
     emoji, label = ("🟢", "LONG (Buy)") if s["side"] == "LONG" else ("🔴", "SHORT (Sell)")
+    lo, hi, limit = tracking.entry_zone(s)
     return (
         f"🚨 <b>Signal #{s['id']}</b>\n\n"
         f"🪙 <b>{s['symbol']}/USDT</b> — {emoji} {label}\n"
-        f"🎯 Entry: <code>{f(s['entry'])}</code>\n"
+        f"🎯 Entry (market price): <code>{f(s['entry'])}</code>\n"
+        f"📍 Entry zone: <code>{f(lo)}</code> – <code>{f(hi)}</code>\n"
+        f"🚫 Skip if price is already beyond <code>{f(limit)}</code>\n"
         f"🛑 Stop Loss: <code>{f(s['sl'])}</code>\n"
         f"✅ Target 1: <code>{f(s['tp1'])}</code>\n"
         f"✅ Target 2: <code>{f(s['tp2'])}</code>\n\n"
@@ -96,7 +100,8 @@ async def start(m: Message):
 async def help_(m: Message):
     await m.answer(
         "ℹ️ <b>Help</b>\n\n"
-        "• Every signal includes an entry, a stop loss and two targets.\n"
+        "• Every signal includes the market entry price, an entry zone, a stop loss and two targets.\n"
+        "• If price is already beyond the “skip” level when you see a signal, do not chase it.\n"
         f"• At most {MAX_DAILY_SIGNALS} signals are sent per 24 hours, so you are never overwhelmed.\n"
         "• Use “📊 Signal Tracker” to see the live status of all open signals.\n"
         "• The result of every signal (target / stop loss) is sent to you automatically.\n\n" + DISCLAIMER)
@@ -192,13 +197,27 @@ async def tracker(m: Message):
 @dp.message(F.text == BTN_STATS)
 @dp.message(Command("stats"))
 async def stats(m: Message):
-    s = await db.stats()
-    closed = s["wins"] + s["losses"]
-    rate = f"{s['wins'] / closed * 100:.0f}%" if closed else "—"
+    s = await db.pool.fetchrow(
+        "SELECT count(*) FILTER (WHERE status='tp2') tp2, "
+        "count(*) FILTER (WHERE status='tp1_be') be, "
+        "count(*) FILTER (WHERE status='sl') sl, "
+        "count(*) FILTER (WHERE status='expired') expired, "
+        "count(*) FILTER (WHERE status IN ('open','tp1')) open FROM signals")
+    closed = s["tp2"] + s["be"] + s["sl"]
+    rate = f"{s['tp2'] / closed * 100:.0f}%" if closed else "—"
+    safe = f"{(s['tp2'] + s['be']) / closed * 100:.0f}%" if closed else "—"
+    net = 3 * s["tp2"] - s["sl"]
     await m.answer(
         "📈 <b>Performance (real and transparent)</b>\n\n"
-        f"✅ Winners: {s['wins']}\n❌ Stopped out: {s['losses']}\n⌛️ Expired: {s['expired']}\n"
-        f"⏳ Open: {s['open']}\n🎯 Win rate: {rate}")
+        f"🏆 Target 2 hit (+3R): {s['tp2']}\n"
+        f"🟡 Break-even after Target 1 (0R): {s['be']}\n"
+        f"❌ Stopped out (−1R): {s['sl']}\n"
+        f"⌛️ Expired: {s['expired']}\n"
+        f"⏳ Open: {s['open']}\n\n"
+        f"🎯 Win rate (Target 2): {rate}\n"
+        f"🛡 Not-a-loss rate: {safe}\n"
+        f"📐 Net result: {net:+d}R\n\n"
+        "Results are measured from the market entry price shown in each signal.")
 
 
 # ---------------- admin ----------------
@@ -208,6 +227,7 @@ async def admin(m: Message):
         return
     u = await db.count_users()
     await m.answer(f"👥 Users: {u['total']}\n💎 Subscribed: {u['paid']}\n🎁 On trial: {u['trial']}\n\n"
+                   "/dashboard · /users · /user &lt;id&gt;\n"
                    "/grant &lt;user_id&gt; &lt;days&gt;\n/broadcast &lt;text&gt;")
 
 
@@ -232,7 +252,8 @@ async def bc(m: Message, command: CommandObject):
 
 # ---------------- background loops ----------------
 async def scanner(bot: Bot):
-    await asyncio.sleep(10)
+    """Scans right after each hourly candle closes (:01, :16, :31, :46)."""
+    await asyncio.sleep(tracking.seconds_to_next_scan(SCAN_INTERVAL))
     while True:
         try:
             used = await db.signals_last_24h()
@@ -251,13 +272,24 @@ async def scanner(bot: Bot):
                         except Exception as e:
                             log.warning("scan %s failed: %s", sym, e)
                         await asyncio.sleep(0.2)
-                cands.sort(key=lambda x: x["score"], reverse=True)
-                for sig in cands[:MAX_DAILY_SIGNALS - used]:
-                    row = await db.add_signal(sig)
-                    await broadcast(bot, await db.active_user_ids(), signal_text(row))
+                    cands.sort(key=lambda x: x["score"], reverse=True)
+                    quota = min(tracking.MAX_PER_SCAN, MAX_DAILY_SIGNALS - used)
+                    sent = 0
+                    for sig in cands:
+                        if sent >= quota:
+                            break
+                        live = await analysis.ticker(s, f"{sig['symbol']}-USDT")
+                        fresh = tracking.refresh_entry(sig, live)
+                        if fresh is None:
+                            log.info("skip %s %s: candle-close entry %s vs live %s is stale",
+                                     sig["symbol"], sig["side"], sig["entry"], live)
+                            continue
+                        row = await db.add_signal(fresh)
+                        await broadcast(bot, await db.active_user_ids(), signal_text(row))
+                        sent += 1
         except Exception:
             log.exception("scanner")
-        await asyncio.sleep(SCAN_INTERVAL)
+        await asyncio.sleep(tracking.seconds_to_next_scan(SCAN_INTERVAL))
 
 
 async def tracker_loop(bot: Bot):
@@ -268,35 +300,39 @@ async def tracker_loop(bot: Bot):
             if sigs:
                 async with aiohttp.ClientSession() as s:
                     for g in sigs:
-                        price = await analysis.ticker(s, f"{g['symbol']}-USDT")
-                        if price is None:
+                        try:
+                            rows = await tracking.candles_since(s, f"{g['symbol']}-USDT", g["created_at"])
+                        except Exception as e:
+                            log.warning("tracker %s failed: %s", g["symbol"], e)
                             continue
-                        await handle_signal(bot, g, price)
+                        if rows is None:
+                            continue
+                        await handle_signal(bot, g, rows)
         except Exception:
             log.exception("tracker")
         await asyncio.sleep(60)
 
 
-async def handle_signal(bot: Bot, g, price):
-    long = g["side"] == "LONG"
-    sl = g["entry"] if g["status"] == "tp1" else g["sl"]
-    hit_sl = price <= sl if long else price >= sl
-    hit_tp2 = price >= g["tp2"] if long else price <= g["tp2"]
-    hit_tp1 = price >= g["tp1"] if long else price <= g["tp1"]
+async def handle_signal(bot: Bot, g, rows):
+    result = tracking.simulate(g, rows)
+    prev = g["status"]
+    if prev == "tp1" and result in ("open", "tp1"):
+        result = "tp1"
+    elif prev == "tp1" and result == "sl":
+        result = "tp1_be"  # Target 1 was already announced; never downgrade to a plain loss
     age = dt.datetime.now(dt.timezone.utc) - g["created_at"]
     head = f"<b>#{g['id']} {g['symbol']}/USDT {g['side']}</b>\n"
     msg = None
-    if hit_tp2:
+    if result == "tp2":
         await db.set_status(g["id"], "tp2", True)
         msg = head + "🏆 Target 2 reached! Signal closed with full profit."
-    elif hit_sl:
-        if g["status"] == "tp1":
-            await db.set_status(g["id"], "tp1_be", True)
-            msg = head + "🟡 Price returned to entry after Target 1; signal closed at break-even."
-        else:
-            await db.set_status(g["id"], "sl", True)
-            msg = head + "❌ Stop loss hit. Signal closed."
-    elif hit_tp1 and g["status"] == "open":
+    elif result == "tp1_be":
+        await db.set_status(g["id"], "tp1_be", True)
+        msg = head + "🟡 Price returned to entry after Target 1; signal closed at break-even."
+    elif result == "sl":
+        await db.set_status(g["id"], "sl", True)
+        msg = head + "❌ Stop loss hit. Signal closed."
+    elif result == "tp1" and prev == "open":
         await db.set_status(g["id"], "tp1")
         msg = head + f"🎯 Target 1 reached! Move your stop loss to entry (<code>{f(g['entry'])}</code>)."
     elif age > dt.timedelta(hours=SIGNAL_MAX_AGE_HOURS):
