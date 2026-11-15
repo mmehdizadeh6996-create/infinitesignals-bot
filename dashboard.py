@@ -115,13 +115,19 @@ FROM (
 """
 
 Q_FUNNEL_SRC = """
-SELECT coalesce(u.source, 'organic') src, count(*) started,
-  count(*) FILTER (WHERE EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id)) checkout,
-  count(*) FILTER (WHERE EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id AND p.status = 'paid')) paid,
-  coalesce(sum((SELECT sum(amount_micro) FROM payments p WHERE p.user_id = u.id AND p.status = 'paid')), 0) rev,
-  coalesce((SELECT sum(usdt) FROM ad_spend a WHERE a.source = coalesce(u.source, 'organic')), 0) spend
-FROM users u WHERE u.joined_at > now() - make_interval(days => $1)
-GROUP BY 1 ORDER BY started DESC LIMIT 8
+SELECT t.src, count(*) started,
+  count(*) FILTER (WHERE t.has_checkout) checkout,
+  count(*) FILTER (WHERE t.has_paid) paid,
+  coalesce(sum(t.rev), 0) rev,
+  coalesce((SELECT sum(usdt) FROM ad_spend a WHERE a.source = t.src), 0) spend
+FROM (
+  SELECT coalesce(u.source, 'organic') src,
+    EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id) has_checkout,
+    EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id AND p.status = 'paid') has_paid,
+    coalesce((SELECT sum(amount_micro) FROM payments p WHERE p.user_id = u.id AND p.status = 'paid'), 0) rev
+  FROM users u WHERE u.joined_at > now() - make_interval(days => $1)
+) t
+GROUP BY t.src ORDER BY started DESC LIMIT 8
 """
 
 FUNNEL_DAYS = {"all": 36500, "30": 30, "7": 7}
