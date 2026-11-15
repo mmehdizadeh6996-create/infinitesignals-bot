@@ -1,4 +1,4 @@
-"""Admin dashboard: /dashboard (overview + sections), /users, /user <id>.
+"""Admin dashboard: /dashboard (overview + sections), /funnel, /spend, /users, /user <id>.
 
 Registered on the main dispatcher from main.py. All handlers are admin-only
 (ADMIN_IDS). Times are UTC. Revenue periods use payments.created_at because the
@@ -7,6 +7,7 @@ payments table has no separate paid_at column (payments confirm within the
 """
 import datetime as dt
 import html
+import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -98,6 +99,33 @@ SELECT id, symbol, side, status, score, created_at
 FROM signals ORDER BY created_at DESC LIMIT 5
 """
 
+Q_FUNNEL = """
+SELECT count(*) started,
+  count(*) FILTER (WHERE has_checkout) checkout,
+  count(*) FILTER (WHERE has_paid) paid,
+  count(*) FILTER (WHERE trial_end > now() AND NOT has_paid) trial_live,
+  count(*) FILTER (WHERE trial_end <= now() AND NOT has_paid AND NOT has_checkout) lost_no_checkout,
+  count(*) FILTER (WHERE trial_end <= now() AND NOT has_paid AND has_checkout) lost_at_checkout
+FROM (
+  SELECT u.trial_end,
+    EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id) has_checkout,
+    EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id AND p.status = 'paid') has_paid
+  FROM users u WHERE u.joined_at > now() - make_interval(days => $1)
+) t
+"""
+
+Q_FUNNEL_SRC = """
+SELECT coalesce(u.source, 'organic') src, count(*) started,
+  count(*) FILTER (WHERE EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id)) checkout,
+  count(*) FILTER (WHERE EXISTS(SELECT 1 FROM payments p WHERE p.user_id = u.id AND p.status = 'paid')) paid,
+  coalesce(sum((SELECT sum(amount_micro) FROM payments p WHERE p.user_id = u.id AND p.status = 'paid')), 0) rev,
+  coalesce((SELECT sum(usdt) FROM ad_spend a WHERE a.source = coalesce(u.source, 'organic')), 0) spend
+FROM users u WHERE u.joined_at > now() - make_interval(days => $1)
+GROUP BY 1 ORDER BY started DESC LIMIT 8
+"""
+
+FUNNEL_DAYS = {"all": 36500, "30": 30, "7": 7}
+
 
 # ---------------------------------------------------------------- helpers
 def usdt(micro) -> str:
@@ -139,6 +167,7 @@ def keyboard(current, extra_row=None) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="👥 Users", callback_data="adm:users:1")],
         [InlineKeyboardButton(text="💰 Revenue", callback_data="adm:revenue"),
          InlineKeyboardButton(text="📡 Signals", callback_data="adm:signals")],
+        [InlineKeyboardButton(text="🔻 Funnel", callback_data="adm:funnel:all")],
         [InlineKeyboardButton(text="🔄 Refresh", callback_data=f"adm:{current}")],
     ]
     if extra_row:
@@ -230,6 +259,38 @@ def fmt_signals(s, syms, recent) -> str:
     )
 
 
+def fmt_funnel(t, srcs, label) -> str:
+    st, ck, pd_ = t["started"], t["checkout"], t["paid"]
+    top = max(st, 1)
+    lines = (
+        f"1️⃣ Started bot (trial begins): <b>{st}</b>\n<code>{bar(st, top, 12):<12}</code>\n"
+        f"2️⃣ Opened checkout: <b>{ck}</b> · {pct(ck, st)} of started\n<code>{bar(ck, top, 12):<12}</code>\n"
+        f"3️⃣ Paid: <b>{pd_}</b> · {pct(pd_, ck)} of checkouts · {pct(pd_, st)} of started\n"
+        f"<code>{bar(pd_, top, 12):<12}</code>"
+    )
+    src_lines = []
+    for r in srcs:
+        rev = float(r["rev"] or 0) / 1_000_000
+        sp = float(r["spend"] or 0)
+        cost = ""
+        if sp > 0:
+            cost = (f"\n   spend {sp:,.2f} · per trial {sp / r['started']:,.2f}"
+                    + (f" · per paid {sp / r['paid']:,.2f}" if r["paid"] else " · per paid —"))
+        src_lines.append(
+            f"• <code>{html.escape(r['src'])}</code>: {r['started']} → {r['checkout']} → {r['paid']} "
+            f"({pct(r['paid'], r['started'])}) · {rev:,.2f} USDT{cost}")
+    return (
+        f"🔻 <b>Dashboard — Sales funnel</b> ({label})\n\n{lines}\n\n"
+        f"<b>Where trials end</b>\n"
+        f"• Still in trial: {t['trial_live']}\n"
+        f"• Trial ended, never opened checkout: {t['lost_no_checkout']}\n"
+        f"• Trial ended after opening checkout: {t['lost_at_checkout']}\n\n"
+        f"<b>By source</b> (started → checkout → paid)\n" + ("\n".join(src_lines) or "• —") + "\n\n"
+        "<i>Source = the ad's start parameter (t.me/bot?start=ad_x). Log ad spend with "
+        "/spend &lt;source&gt; &lt;usdt&gt; to see cost per trial and per paid user.</i>"
+    )
+
+
 def fmt_users(rows, page, pages, total, now) -> str:
     lines = []
     for r in rows:
@@ -261,7 +322,7 @@ def _now():
     return dt.datetime.now(dt.timezone.utc)
 
 
-async def render(section: str, page: int = 1):
+async def render(section: str, page: int = 1, page_arg: str = ""):
     pool = db.pool
     now = _now()
     if section == "revenue":
@@ -271,6 +332,14 @@ async def render(section: str, page: int = 1):
         recent = await pool.fetch(Q_REV_RECENT)
         total = await pool.fetchval("SELECT count(*) FROM users")
         return fmt_revenue(rev, plans, b, recent, total), keyboard("revenue")
+    if section == "funnel":
+        key = page_arg if page_arg in FUNNEL_DAYS else "all"
+        t = await pool.fetchrow(Q_FUNNEL, FUNNEL_DAYS[key])
+        srcs = await pool.fetch(Q_FUNNEL_SRC, FUNNEL_DAYS[key])
+        label = {"all": "all time", "30": "last 30 days", "7": "last 7 days"}[key]
+        row = [InlineKeyboardButton(text=("• " if k == key else "") + n, callback_data=f"adm:funnel:{k}")
+               for k, n in (("7", "7d"), ("30", "30d"), ("all", "All"))]
+        return fmt_funnel(t, srcs, label), keyboard(f"funnel:{key}", row)
     if section == "signals":
         s = await pool.fetchrow(Q_SIG)
         syms = await pool.fetch(Q_SYM)
@@ -308,6 +377,30 @@ async def dashboard_cmd(m: Message):
     await m.answer(text, reply_markup=kb)
 
 
+@router.message(Command("funnel"))
+async def funnel_cmd(m: Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    text, kb = await render("funnel", page_arg="all")
+    await m.answer(text, reply_markup=kb)
+
+
+@router.message(Command("spend"))
+async def spend_cmd(m: Message, command: CommandObject):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    parts = (command.args or "").split()
+    try:
+        src, amt = parts[0], float(parts[1])
+        if len(parts) != 2 or amt <= 0 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", src):
+            raise ValueError
+    except (IndexError, ValueError):
+        return await m.answer("Usage: /spend &lt;source&gt; &lt;usdt&gt;\nExample: /spend ad_noise 25")
+    await db.pool.execute("INSERT INTO ad_spend(source, usdt) VALUES($1, $2)", src, amt)
+    total = await db.pool.fetchval("SELECT sum(usdt) FROM ad_spend WHERE source=$1", src)
+    await m.answer(f"Logged {amt:,.2f} USDT for <code>{html.escape(src)}</code> (total {total:,.2f}). See /funnel.")
+
+
 @router.message(Command("users"))
 async def users_cmd(m: Message, command: CommandObject):
     if m.from_user.id not in ADMIN_IDS:
@@ -340,7 +433,7 @@ async def dashboard_cb(c: CallbackQuery):
     parts = c.data.split(":")
     section = parts[1] if len(parts) > 1 else "overview"
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
-    text, kb = await render(section, page)
+    text, kb = await render(section, page, parts[2] if len(parts) > 2 else "")
     try:
         await c.message.edit_text(text, reply_markup=kb)
     except TelegramBadRequest:

@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import logging
+import re
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -83,8 +84,10 @@ async def need_access(m: Message) -> bool:
 
 # ---------------- handlers ----------------
 @dp.message(CommandStart())
-async def start(m: Message):
-    _, new = await db.upsert_user(m.from_user.id, m.from_user.username)
+async def start(m: Message, command: CommandObject):
+    src = (command.args or "").strip()
+    src = src[:64] if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", src) else None  # ad / campaign tag
+    _, new = await db.upsert_user(m.from_user.id, m.from_user.username, src)
     txt = ("👋 Welcome to <b>InfiniteSignals</b>!\n\n"
            "📡 A few high-quality, carefully filtered signals per day across top coins and meme coins "
            "(BTC, ETH, SOL, DOGE, PEPE, SHIB, WIF and more)\n"
@@ -227,7 +230,8 @@ async def admin(m: Message):
         return
     u = await db.count_users()
     await m.answer(f"👥 Users: {u['total']}\n💎 Subscribed: {u['paid']}\n🎁 On trial: {u['trial']}\n\n"
-                   "/dashboard · /users · /user &lt;id&gt;\n"
+                   "/dashboard · /funnel · /users · /user &lt;id&gt;\n"
+                   "/spend &lt;source&gt; &lt;usdt&gt;\n"
                    "/grant &lt;user_id&gt; &lt;days&gt;\n/broadcast &lt;text&gt;")
 
 
