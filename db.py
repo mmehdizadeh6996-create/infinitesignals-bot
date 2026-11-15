@@ -30,6 +30,13 @@ CREATE TABLE IF NOT EXISTS signals(
     created_at TIMESTAMPTZ DEFAULT now(),
     closed_at TIMESTAMPTZ
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT;
+CREATE TABLE IF NOT EXISTS ad_spend(
+    id SERIAL PRIMARY KEY,
+    source TEXT NOT NULL,
+    usdt DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
 """
 
 
@@ -40,13 +47,13 @@ async def init():
 
 
 # ---------- users ----------
-async def upsert_user(uid, username):
+async def upsert_user(uid, username, source=None):
     row = await pool.fetchrow("SELECT * FROM users WHERE id=$1", uid)
     if row:
         return row, False
     row = await pool.fetchrow(
-        "INSERT INTO users(id,username,trial_end) VALUES($1,$2, now()+make_interval(days=>$3)) RETURNING *",
-        uid, username, TRIAL_DAYS,
+        "INSERT INTO users(id,username,trial_end,source) VALUES($1,$2, now()+make_interval(days=>$3), $4) RETURNING *",
+        uid, username, TRIAL_DAYS, source,
     )
     return row, True
 
