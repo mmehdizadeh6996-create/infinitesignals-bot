@@ -7,14 +7,15 @@ import db
 log = logging.getLogger("payments")
 
 
-async def new_payment(uid: int, plan: str):
-    """Creates a unique amount (price + a few cents) so the payment can be matched automatically."""
+async def new_payment(uid: int, plan: str, pct: int = 0, promo: str | None = None):
+    """Creates a unique amount (price, minus any promo discount, plus a few cents) so the
+    payment can be matched automatically."""
     pend = {p["amount_micro"] for p in await db.pending_payments(PAYMENT_TTL_MIN)}
-    base = PLANS[plan]["price"] * 1_000_000
+    base = PLANS[plan]["price"] * 1_000_000 * (100 - pct) // 100
     for _ in range(200):
         amount = base + random.randint(1, 99) * 10_000
         if amount not in pend:
-            return await db.create_payment(uid, plan, amount)
+            return await db.create_payment(uid, plan, amount, promo, pct)
     raise RuntimeError("no free amount")
 
 

@@ -31,6 +31,18 @@ CREATE TABLE IF NOT EXISTS signals(
     closed_at TIMESTAMPTZ
 );
 ALTER TABLE users ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS promo_code TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS promo_code TEXT;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS discount_pct INT DEFAULT 0;
+CREATE TABLE IF NOT EXISTS promo_codes(
+    code TEXT PRIMARY KEY,
+    percent INT NOT NULL,
+    max_uses INT,
+    used INT NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS ad_spend(
     id SERIAL PRIMARY KEY,
     source TEXT NOT NULL,
@@ -89,9 +101,10 @@ async def count_users():
 
 
 # ---------- payments ----------
-async def create_payment(uid, plan, amount_micro):
+async def create_payment(uid, plan, amount_micro, promo=None, pct=0):
     return await pool.fetchrow(
-        "INSERT INTO payments(user_id,plan,amount_micro) VALUES($1,$2,$3) RETURNING *", uid, plan, amount_micro)
+        "INSERT INTO payments(user_id,plan,amount_micro,promo_code,discount_pct) VALUES($1,$2,$3,$4,$5) RETURNING *",
+        uid, plan, amount_micro, promo, pct)
 
 
 async def pending_payments(ttl_min):
@@ -106,7 +119,11 @@ async def txid_used(txid):
 
 
 async def mark_paid(pid, txid):
-    return await pool.execute("UPDATE payments SET status='paid', txid=$2 WHERE id=$1 AND status='pending'", pid, txid)
+    res = await pool.execute("UPDATE payments SET status='paid', txid=$2 WHERE id=$1 AND status='pending'", pid, txid)
+    if res.endswith("1"):  # count a promo use only once the payment is confirmed
+        await pool.execute(
+            "UPDATE promo_codes SET used = used + 1 WHERE code = (SELECT promo_code FROM payments WHERE id=$1)", pid)
+    return res
 
 
 async def get_payment(pid):

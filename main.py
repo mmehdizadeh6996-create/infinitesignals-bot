@@ -18,8 +18,10 @@ from aiohttp import web  # noqa: E402
 
 import bot  # noqa: E402
 import dashboard  # noqa: E402
+import growth  # noqa: E402
 
 bot.dp.include_router(dashboard.router)  # admin-only /dashboard, /users, /user
+bot.dp.include_router(growth.router)  # promo codes + segment messaging
 
 
 async def health(_request):
