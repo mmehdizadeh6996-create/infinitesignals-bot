@@ -13,6 +13,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 
 import analysis
 import db
+import growth
 import payments
 import tracking
 from config import (ADMIN_IDS, BOT_TOKEN, MAX_DAILY_SIGNALS, MIN_SCORE, PAYMENT_TTL_MIN, PLANS,
@@ -68,17 +69,12 @@ async def broadcast(bot: Bot, ids, text):
         await asyncio.sleep(0.05)
 
 
-def plans_kb():
-    rows = [[InlineKeyboardButton(text=f"{p['title']} — {p['price']} USDT", callback_data=f"buy:{k}")]
-            for k, p in PLANS.items()]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 async def need_access(m: Message) -> bool:
     if await db.has_access(m.from_user.id):
         return True
-    await m.answer("⛔️ Your free trial or subscription has ended. Choose a plan to continue:",
-                   reply_markup=plans_kb())
+    await m.answer("⛔️ Your free trial or subscription has ended. Choose a plan to continue "
+                   "(have a promo code? Send /promo CODE):",
+                   reply_markup=await growth.plans_kb_for(m.from_user.id))
     return False
 
 
@@ -124,14 +120,15 @@ async def me(m: Message):
         lines.append(f"🎁 Free trial until {u['trial_end']:%Y-%m-%d %H:%M} (UTC)")
     else:
         lines.append("⛔️ You have no active subscription.")
-    await m.answer("\n".join(lines), reply_markup=plans_kb())
+    await m.answer("\n".join(lines), reply_markup=await growth.plans_kb_for(m.from_user.id))
 
 
 @dp.message(F.text == BTN_BUY)
 @dp.message(Command("buy"))
 async def buy(m: Message):
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer("💳 Choose a plan:", reply_markup=plans_kb())
+    await m.answer("💳 Choose a plan (promo code? Send /promo CODE):",
+                   reply_markup=await growth.plans_kb_for(m.from_user.id))
 
 
 @dp.callback_query(F.data.startswith("buy:"))
@@ -140,12 +137,14 @@ async def buy_cb(c: CallbackQuery):
     if plan not in PLANS:
         return await c.answer()
     await db.upsert_user(c.from_user.id, c.from_user.username)
-    p = await payments.new_payment(c.from_user.id, plan)
+    code, pct = await growth.user_discount(c.from_user.id)
+    p = await payments.new_payment(c.from_user.id, plan, pct, code)
     amount = p["amount_micro"] / 1_000_000
+    disc = f"🏷 Code <b>{code}</b>: {pct}% off\n" if code else ""
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
         text="✅ I've paid — check now", callback_data=f"chk:{p['id']}")]])
     await c.message.answer(
-        f"🧾 <b>{PLANS[plan]['title']} plan</b>\n\n"
+        f"🧾 <b>{PLANS[plan]['title']} plan</b>\n{disc}\n"
         f"Send exactly this amount to the address below:\n\n"
         f"💰 Amount: <code>{amount:.2f}</code> USDT\n"
         f"🌐 Network: <b>TRON (TRC20)</b>\n"
@@ -232,6 +231,8 @@ async def admin(m: Message):
     await m.answer(f"👥 Users: {u['total']}\n💎 Subscribed: {u['paid']}\n🎁 On trial: {u['trial']}\n\n"
                    "/dashboard · /funnel · /users · /user &lt;id&gt;\n"
                    "/spend &lt;source&gt; &lt;usdt&gt;\n"
+                   "/segments · /msg &lt;segment&gt; [code=CODE] &lt;text&gt;\n"
+                   "/promo_add · /promo_list · /promo_off\n"
                    "/grant &lt;user_id&gt; &lt;days&gt;\n/broadcast &lt;text&gt;")
 
 

@@ -16,6 +16,7 @@ from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
                            Message)
 
 import db
+import growth
 from config import ADMIN_IDS, PLANS
 
 router = Router()
@@ -173,7 +174,9 @@ def keyboard(current, extra_row=None) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="👥 Users", callback_data="adm:users:1")],
         [InlineKeyboardButton(text="💰 Revenue", callback_data="adm:revenue"),
          InlineKeyboardButton(text="📡 Signals", callback_data="adm:signals")],
-        [InlineKeyboardButton(text="🔻 Funnel", callback_data="adm:funnel:all")],
+        [InlineKeyboardButton(text="🔻 Funnel", callback_data="adm:funnel:all"),
+         InlineKeyboardButton(text="📨 Message users", callback_data="adm:seg")],
+        [InlineKeyboardButton(text="🏷 Promo codes", callback_data="adm:promo")],
         [InlineKeyboardButton(text="🔄 Refresh", callback_data=f"adm:{current}")],
     ]
     if extra_row:
@@ -293,7 +296,8 @@ def fmt_funnel(t, srcs, label) -> str:
         f"• Trial ended after opening checkout: {t['lost_at_checkout']}\n\n"
         f"<b>By source</b> (started → checkout → paid)\n" + ("\n".join(src_lines) or "• —") + "\n\n"
         "<i>Source = the ad's start parameter (t.me/bot?start=ad_x). Log ad spend with "
-        "/spend &lt;source&gt; &lt;usdt&gt; to see cost per trial and per paid user.</i>"
+        "/spend &lt;source&gt; &lt;usdt&gt; to see cost per trial and per paid user. "
+        "Message a funnel stage with /segments.</i>"
     )
 
 
@@ -346,6 +350,10 @@ async def render(section: str, page: int = 1, page_arg: str = ""):
         row = [InlineKeyboardButton(text=("• " if k == key else "") + n, callback_data=f"adm:funnel:{k}")
                for k, n in (("7", "7d"), ("30", "30d"), ("all", "All"))]
         return fmt_funnel(t, srcs, label), keyboard(f"funnel:{key}", row)
+    if section == "seg":
+        return await growth.render_segments()
+    if section == "promo":
+        return await growth.render_promos()
     if section == "signals":
         s = await pool.fetchrow(Q_SIG)
         syms = await pool.fetch(Q_SYM)
