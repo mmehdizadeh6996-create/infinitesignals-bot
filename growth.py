@@ -242,16 +242,17 @@ async def render_segments():
         "📨 <b>Message users by funnel stage</b>\n\n"
         f"{seg_lines}\n\n"
         f"<b>By ad source:</b> {src_lines}\n\n"
-        "<b>Send:</b>\n"
-        "<code>/msg no_checkout code=WELCOME20 Your 3 days are over. Get 20% off today.</code>\n"
-        "<code>/msg abandoned Need help paying? Reply here and we will help.</code>\n\n"
-        "You will see a preview and the recipient count, then confirm. "
-        "<code>code=</code> is optional and adds an “Apply code” button.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔻 Funnel", callback_data="adm:funnel:all"),
-         InlineKeyboardButton(text="🏷 Promo codes", callback_data="adm:promo")],
-        [InlineKeyboardButton(text="🔄 Refresh", callback_data="adm:seg")]])
-    return text, kb
+        "<b>Tap a stage below</b>, then send your message text. You get a preview and the "
+        "recipient count, then confirm. Start the text with <code>code=WELCOME20</code> to add an "
+        "“Apply code” button.\n\n"
+        "Or type it: <code>/msg no_checkout code=WELCOME20 Your 3 days are over. Get 20% off.</code>")
+    pick = [InlineKeyboardButton(text=f"{title} ({c[k]})", callback_data=f"seg:pick:{k}")
+            for k, (title, _) in SEGMENTS.items()]
+    rows = [pick[i:i + 2] for i in range(0, len(pick), 2)]
+    rows += [[InlineKeyboardButton(text="🔻 Funnel", callback_data="adm:funnel:all"),
+              InlineKeyboardButton(text="🏷 Promo codes", callback_data="adm:promo")],
+             [InlineKeyboardButton(text="🔄 Refresh", callback_data="adm:seg")]]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(Command("segments"))
@@ -279,36 +280,85 @@ def _promo_kb(code):
         InlineKeyboardButton(text=f"🏷 Apply code {code}", callback_data=f"promo:{code}")]])
 
 
-@router.message(Command("msg"))
-async def msg_cmd(m: Message, command: CommandObject):
-    if not _is_admin(m.from_user.id):
-        return
-    usage = ("Usage: /msg &lt;segment&gt; [code=CODE] &lt;text&gt;\nSee /segments for segment names.")
-    parts = (command.args or "").split(None, 1)
-    if len(parts) < 2:
-        return await m.answer(usage)
-    seg, rest = parts[0].lower(), parts[1]
+_awaiting: dict[int, dict] = {}  # admin id -> {"seg", "ts"}: tapped a stage, next text message is the body
+
+
+async def _preview(m: Message, seg: str, rest: str) -> bool:
+    """Validates `[code=CODE] <text>` for a segment, shows the preview and a confirm button.
+    Returns True when a preview was created."""
+    usage = "Send the message text (optionally starting with code=CODE)."
     code = None
+    rest = rest.strip()
     if rest.lower().startswith("code="):
         tok, _, rest = rest.partition(" ")
         code = tok[5:].upper()
         if not await get_valid_promo(code):
-            return await m.answer(f"Code <code>{html.escape(code)}</code> is not active. Create it with /promo_add.")
+            await m.answer(f"Code <code>{html.escape(code)}</code> is not active. Create it with /promo_add.")
+            return False
     text = rest.strip()
     if not text:
-        return await m.answer(usage)
+        await m.answer(usage)
+        return False
     ids = await seg_ids(seg)
     if ids is None:
-        return await m.answer("Unknown segment. See /segments.")
+        await m.answer("Unknown segment. See /segments.")
+        return False
     if not ids:
-        return await m.answer("That segment has no users right now.")
+        await m.answer("That segment has no users right now.")
+        return False
     try:  # the preview is rendered exactly like the real message, so bad HTML fails here, not in the mass send
         await m.answer(text, reply_markup=_promo_kb(code))
     except TelegramBadRequest as e:
-        return await m.answer(f"Message could not be rendered: {html.escape(str(e))}\nFix the text and try again.")
+        await m.answer(f"Message could not be rendered: {html.escape(str(e))}\nFix the text and send it again.")
+        return False
     _pending[m.from_user.id] = {"seg": seg, "text": text, "code": code, "ids": ids, "ts": time.time()}
     await m.answer(f"👆 Preview. Send to <b>{len(ids)}</b> users in <code>{html.escape(seg)}</code>?",
                    reply_markup=_confirm_kb(len(ids)))
+    return True
+
+
+@router.message(Command("msg"))
+async def msg_cmd(m: Message, command: CommandObject):
+    if not _is_admin(m.from_user.id):
+        return
+    parts = (command.args or "").split(None, 1)
+    if len(parts) < 2:
+        return await m.answer("Usage: /msg &lt;segment&gt; [code=CODE] &lt;text&gt;\nSee /segments for segment names.")
+    await _preview(m, parts[0].lower(), parts[1])
+
+
+def _waiting_for_text(m: Message) -> bool:
+    a = _awaiting.get(m.from_user.id)
+    return bool(a and time.time() - a["ts"] <= PENDING_TTL and m.text and not m.text.startswith("/"))
+
+
+@router.message(F.text, _waiting_for_text)
+async def msg_text(m: Message):
+    if not _is_admin(m.from_user.id):
+        return
+    a = _awaiting[m.from_user.id]
+    if await _preview(m, a["seg"], m.text):
+        _awaiting.pop(m.from_user.id, None)
+
+
+@router.callback_query(F.data.startswith("seg:pick:"))
+async def seg_pick(c: CallbackQuery):
+    if not _is_admin(c.from_user.id):
+        return await c.answer("Admins only", show_alert=True)
+    seg = c.data.split(":", 2)[2]
+    ids = await seg_ids(seg)
+    if ids is None:
+        return await c.answer("Unknown segment", show_alert=True)
+    if not ids:
+        return await c.answer("No users in this segment right now.", show_alert=True)
+    _awaiting[c.from_user.id] = {"seg": seg, "ts": time.time()}
+    title = SEGMENTS[seg][0]
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✖ Cancel", callback_data="seg:cancel")]])
+    await c.message.answer(
+        f"✍️ <b>{html.escape(title)}</b> — {len(ids)} users.\n"
+        "Send the message text now. Start with <code>code=WELCOME20</code> to attach a promo code button.",
+        reply_markup=kb)
+    await c.answer()
 
 
 async def _send_campaign(bot, admin_id: int, job: dict):
@@ -340,6 +390,7 @@ async def seg_cb(c: CallbackQuery):
     if not _is_admin(c.from_user.id):
         return await c.answer("Admins only", show_alert=True)
     job = _pending.pop(c.from_user.id, None)
+    _awaiting.pop(c.from_user.id, None)
     if c.data == "seg:cancel":
         await c.message.edit_text("Cancelled.")
         return await c.answer()
