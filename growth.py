@@ -29,6 +29,11 @@ CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,32}")
 MAX_PERCENT = 90
 PENDING_TTL = 600  # seconds an unconfirmed /msg preview stays valid
 
+# automatic trial win-back offer (see winback.py)
+WINBACK_CODE = "TRIAL35"
+WINBACK_PCT = 35
+WINBACK_HOURS = 48  # the offer is valid this long after each user's trial ends
+
 # ---------------------------------------------------------------- segments
 NOT_PAID = "(sub_end IS NULL OR sub_end <= now())"
 HAS_PAY = "EXISTS (SELECT 1 FROM payments p WHERE p.user_id = users.id)"
@@ -102,13 +107,22 @@ async def used_by(uid: int, code: str) -> bool:
         uid, code.upper()))
 
 
+async def in_window(uid: int, code: str) -> bool:
+    """The win-back code only works for WINBACK_HOURS after the user's own trial ended."""
+    if (code or "").upper() != WINBACK_CODE:
+        return True
+    return bool(await db.pool.fetchval(
+        "SELECT 1 FROM users WHERE id = $1 AND trial_end + make_interval(hours => $2) > now()",
+        uid, WINBACK_HOURS))
+
+
 async def user_discount(uid: int):
     """(code, percent) the user can use right now, or (None, 0)."""
     code = await db.pool.fetchval("SELECT promo_code FROM users WHERE id = $1", uid)
     if not code:
         return None, 0
     p = await get_valid_promo(code)
-    if not p or await used_by(uid, code):
+    if not p or await used_by(uid, code) or not await in_window(uid, code):
         return None, 0
     return p["code"], p["percent"]
 
@@ -132,7 +146,7 @@ async def apply_code(uid: int, username, raw: str):
     await db.upsert_user(uid, username)
     code = (raw or "").strip().upper()
     p = await get_valid_promo(code)
-    if not p or await used_by(uid, code):
+    if not p or await used_by(uid, code) or not await in_window(uid, code):
         return "❌ This code is invalid, expired or already used.", None
     await db.pool.execute("UPDATE users SET promo_code = $2 WHERE id = $1", uid, p["code"])
     return (f"✅ Code <b>{html.escape(p['code'])}</b> applied: <b>{p['percent']}% off</b> your next purchase.\n"
