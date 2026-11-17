@@ -19,9 +19,12 @@ from aiohttp import web  # noqa: E402
 import bot  # noqa: E402
 import dashboard  # noqa: E402
 import growth  # noqa: E402
+import winback  # noqa: E402
 
 bot.dp.include_router(dashboard.router)  # admin-only /dashboard, /users, /user
 bot.dp.include_router(growth.router)  # promo codes + segment messaging
+bot.dp.include_router(winback.router)  # automatic trial follow-up + /winback
+bot.dp.startup.register(winback.on_startup)
 
 
 async def health(_request):
