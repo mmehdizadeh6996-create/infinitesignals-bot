@@ -92,6 +92,10 @@ async def start(m: Message, command: CommandObject):
     txt += (f"🎁 Your <b>{TRIAL_DAYS}-day free trial</b> is now active!" if new
             else "Tap “👤 My Subscription” to see your status.")
     await m.answer(txt, reply_markup=MENU)
+    code, pct = await growth.user_discount(m.from_user.id)  # applies the campaign code, if one is running
+    if code:
+        await m.answer(f"🔥 <b>{pct}% OFF every plan</b> — your code <b>{code}</b> is already applied.\n"
+                       "Prices below include the discount:", reply_markup=growth.plans_markup(pct))
 
 
 @dp.message(F.text == BTN_HELP)

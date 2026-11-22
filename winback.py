@@ -72,8 +72,14 @@ async def _send(bot, uid: int, stage: int) -> bool:
     """Sends one stage message. Returns False only when Telegram asked us to slow down (retry later)."""
     if stage >= 2:  # apply the offer before showing prices, so the buttons and checkout match
         await db.pool.execute("UPDATE users SET promo_code = $2 WHERE id = $1", uid, CODE)
+    text, kb = TEXT[stage], growth.plans_markup(PCT if stage >= 2 else 0)
+    if stage == 1:  # price shown must match checkout: a running campaign may already discount it
+        camp = await growth.auto_offer()
+        if camp:
+            text += f"\n\n🔥 Black Friday: {camp['percent']}% off is applied to the prices below."
+            kb = growth.plans_markup(camp["percent"])
     try:
-        await bot.send_message(uid, TEXT[stage], reply_markup=growth.plans_markup(PCT if stage >= 2 else 0))
+        await bot.send_message(uid, text, reply_markup=kb)
     except TelegramRetryAfter as e:
         await asyncio.sleep(e.retry_after + 1)
         return False
@@ -85,7 +91,9 @@ async def _send(bot, uid: int, stage: int) -> bool:
 
 async def run_once(bot) -> int:
     sent = 0
-    for stage in (1, 2, 3):
+    # While a campaign (Black Friday) runs, the 35% trial offer is paused: stage 2 and 3 wait.
+    stages = (1,) if await growth.auto_offer() else (1, 2, 3)
+    for stage in stages:
         for r in await db.pool.fetch(QUERIES[stage]):
             if await _send(bot, r["id"], stage):
                 sent += 1

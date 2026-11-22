@@ -116,8 +116,47 @@ async def in_window(uid: int, code: str) -> bool:
         uid, WINBACK_HOURS))
 
 
+_auto_cache = (0.0, None)
+
+
+def auto_cache_clear():
+    global _auto_cache
+    _auto_cache = (0.0, None)
+
+
+async def auto_offer():
+    """The running campaign (Black Friday), or None. Returns the promo row plus `start` / `end`.
+    It runs while now is inside [start, end) and its code is still valid. While it runs, every other
+    discount is paused (see user_discount / apply_code). Cached for a few seconds."""
+    global _auto_cache
+    ts, val = _auto_cache
+    if time.time() - ts < 15:
+        return val
+    rows = await db.pool.fetch("SELECT key, value FROM settings WHERE key LIKE 'auto_%'")
+    cfg = {r["key"]: r["value"] for r in rows}
+    out = None
+    try:
+        if cfg.get("auto_code"):
+            start = dt.datetime.fromisoformat(cfg["auto_start"])
+            end = dt.datetime.fromisoformat(cfg["auto_end"])
+            now = dt.datetime.now(dt.timezone.utc)
+            if start <= now < end:
+                p = await get_valid_promo(cfg["auto_code"])
+                if p:
+                    out = {**dict(p), "start": start, "end": end}
+    except (KeyError, ValueError):
+        log.exception("bad campaign settings")
+    _auto_cache = (time.time(), out)
+    return out
+
+
 async def user_discount(uid: int):
     """(code, percent) the user can use right now, or (None, 0)."""
+    camp = await auto_offer()
+    if camp:  # campaign running: it replaces every other discount, for everyone, automatically
+        if await used_by(uid, camp["code"]):
+            return None, 0
+        return camp["code"], camp["percent"]
     code = await db.pool.fetchval("SELECT promo_code FROM users WHERE id = $1", uid)
     if not code:
         return None, 0
@@ -144,6 +183,10 @@ async def plans_kb_for(uid: int) -> InlineKeyboardMarkup:
 async def apply_code(uid: int, username, raw: str):
     """Validates a code for a user and stores it. Returns (text, markup)."""
     await db.upsert_user(uid, username)
+    camp = await auto_offer()
+    if camp:
+        return (f"🔥 Black Friday pricing is live: <b>{camp['percent']}% off</b> is already applied to every plan. "
+                "Other codes can't be combined with it and work again after the sale."), plans_markup(camp["percent"])
     code = (raw or "").strip().upper()
     p = await get_valid_promo(code)
     if not p or await used_by(uid, code) or not await in_window(uid, code):

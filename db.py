@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS promo_codes(
     active BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS settings(
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 CREATE TABLE IF NOT EXISTS ad_spend(
     id SERIAL PRIMARY KEY,
     source TEXT NOT NULL,
