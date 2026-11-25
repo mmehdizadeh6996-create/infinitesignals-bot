@@ -20,14 +20,17 @@ import bot  # noqa: E402
 import dashboard  # noqa: E402
 import growth  # noqa: E402
 import blackfriday  # noqa: E402
+import channel  # noqa: E402
 import winback  # noqa: E402
 
 bot.dp.include_router(dashboard.router)  # admin-only /dashboard, /users, /user
 bot.dp.include_router(growth.router)  # promo codes + segment messaging
 bot.dp.include_router(winback.router)  # automatic trial follow-up + /winback
 bot.dp.include_router(blackfriday.router)  # /campaign: Black Friday mode
+bot.dp.include_router(channel.router)  # public results channel
 bot.dp.startup.register(winback.on_startup)
 bot.dp.startup.register(blackfriday.on_startup)
+bot.dp.startup.register(channel.on_startup)
 
 
 async def health(_request):
