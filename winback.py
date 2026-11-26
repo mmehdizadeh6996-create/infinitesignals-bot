@@ -21,6 +21,7 @@ from aiogram.types import Message
 
 import db
 import growth
+import wake
 from config import ADMIN_IDS
 
 log = logging.getLogger("winback")
@@ -29,7 +30,7 @@ router = Router()
 ENABLED = os.getenv("WINBACK", "1") != "0"
 CODE, PCT, WINDOW_H = growth.WINBACK_CODE, growth.WINBACK_PCT, growth.WINBACK_HOURS
 LAST_CHANCE_AT_H = WINDOW_H - 12  # hours after trial end
-CHECK_EVERY = 600  # seconds
+CHECK_EVERY = 4  # scheduler slots (4 x 15 min = hourly)
 BATCH = 200
 SKIPPED = 9
 
@@ -102,7 +103,7 @@ async def run_once(bot) -> int:
 
 
 async def loop(bot):
-    await asyncio.sleep(30)
+    await wake.tick()
     while True:
         try:
             n = await run_once(bot)
@@ -110,7 +111,7 @@ async def loop(bot):
                 log.info("winback: %s messages sent", n)
         except Exception:
             log.exception("winback")
-        await asyncio.sleep(CHECK_EVERY)
+        await wake.every(CHECK_EVERY)
 
 
 _task = None
@@ -152,7 +153,7 @@ def fmt_stats(s, rev_micro) -> str:
         f"• Bought with the offer: <b>{s['bought']}</b>"
         f" ({growth_pct(s['bought'], s['offered'])} of offers) · {rev_micro / 1_000_000:,.2f} USDT\n"
         f"• Skipped (trial had already ended before launch): {s['skipped']}\n\n"
-        "<i>Messages go out every 10 minutes, once per user per stage. "
+        "<i>Messages go out hourly, once per user per stage. "
         "Manual sends are still available in /segments.</i>")
 
 

@@ -26,6 +26,7 @@ from aiogram.types import Message
 
 import db
 import growth
+import wake
 from config import ADMIN_IDS
 
 log = logging.getLogger("blackfriday")
@@ -35,7 +36,7 @@ DAILY_HOUR = 16  # UTC: evening in Europe, morning in the Americas
 GAP_H = 14  # hours between regular messages to one user
 FINAL_GAP_H = 3  # the two final-day messages only need this much space
 NEW_USER_H = 6  # a user who just joined already saw the offer in the welcome
-CHECK_EVERY = 600
+CHECK_EVERY = 2  # scheduler slots (30 min)
 BATCH = 200
 
 MIGRATE = ["CREATE TABLE IF NOT EXISTS bf_sent(uid BIGINT NOT NULL, tag TEXT NOT NULL, "
@@ -123,7 +124,7 @@ async def run_once(bot) -> int:
 
 
 async def loop(bot):
-    await asyncio.sleep(45)
+    await wake.tick()
     while True:
         try:
             n = await run_once(bot)
@@ -131,7 +132,7 @@ async def loop(bot):
                 log.info("black friday: %s messages sent", n)
         except Exception:
             log.exception("black friday")
-        await asyncio.sleep(CHECK_EVERY)
+        await wake.every(CHECK_EVERY)
 
 
 async def on_startup(bot):

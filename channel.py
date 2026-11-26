@@ -20,6 +20,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import analysis
 import db
+import wake
 from config import ADMIN_IDS
 
 log = logging.getLogger("channel")
@@ -27,7 +28,7 @@ router = Router()
 
 BACKFILL = 10  # on linking, only the latest closed signals are posted one by one; the summary covers the rest
 SUMMARY_HOUR = 20  # UTC, once a day
-CHECK_EVERY = 300
+CHECK_EVERY = 2  # scheduler slots (30 min)
 BOT_LINK = "https://t.me/Infinitesignalsbot?start=ch_results"
 CLOSED = ("tp2", "tp1_be", "sl", "expired")
 DISCLAIMER = "<i>Past results do not guarantee future results. Trading carries risk. Not financial advice.</i>"
@@ -151,7 +152,7 @@ async def run_once(bot) -> int:
 
 
 async def loop(bot):
-    await asyncio.sleep(60)
+    await wake.tick()
     while True:
         try:
             n = await run_once(bot)
@@ -159,7 +160,7 @@ async def loop(bot):
                 log.info("channel: %s posts", n)
         except Exception:
             log.exception("channel")
-        await asyncio.sleep(CHECK_EVERY)
+        await wake.every(CHECK_EVERY)
 
 
 async def on_startup(bot):

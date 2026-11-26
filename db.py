@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS ad_spend(
 
 async def init():
     global pool
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=0, max_size=5,
+                                     max_inactive_connection_lifetime=60, timeout=30)
     await pool.execute(SCHEMA)
 
 

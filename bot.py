@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import time
 import logging
 import re
 
@@ -15,6 +16,7 @@ import analysis
 import db
 import growth
 import payments
+import wake
 import tracking
 from config import (ADMIN_IDS, BOT_TOKEN, MAX_DAILY_SIGNALS, MIN_SCORE, PAYMENT_TTL_MIN, PLANS,
                     SCAN_INTERVAL, SIGNAL_MAX_AGE_HOURS, SYMBOL_COOLDOWN_HOURS, SYMBOLS,
@@ -143,6 +145,7 @@ async def buy_cb(c: CallbackQuery):
     await db.upsert_user(c.from_user.id, c.from_user.username)
     code, pct = await growth.user_discount(c.from_user.id)
     p = await payments.new_payment(c.from_user.id, plan, pct, code)
+    watch_payments()
     amount = p["amount_micro"] / 1_000_000
     disc = f"🏷 Code <b>{code}</b>: {pct}% off\n" if code else ""
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
@@ -163,6 +166,7 @@ async def buy_cb(c: CallbackQuery):
 @dp.callback_query(F.data.startswith("chk:"))
 async def check_cb(c: CallbackQuery):
     pid = int(c.data.split(":")[1])
+    watch_payments()
     try:
         await payments.process(c.bot)
     except Exception:
@@ -265,6 +269,7 @@ async def scanner(bot: Bot):
     await asyncio.sleep(tracking.seconds_to_next_scan(SCAN_INTERVAL))
     while True:
         try:
+            invalidate_open()
             used = await db.signals_last_24h()
             if used < MAX_DAILY_SIGNALS:
                 cands = []
@@ -301,11 +306,28 @@ async def scanner(bot: Bot):
         await asyncio.sleep(tracking.seconds_to_next_scan(SCAN_INTERVAL))
 
 
+_open_cache = None  # open signals, kept in memory so the 60 s price check does not touch the database
+_pay_until = 0.0  # payments are polled every 45 s only while a payment is pending
+
+
+def invalidate_open():
+    global _open_cache
+    _open_cache = None
+
+
+def watch_payments():
+    global _pay_until
+    _pay_until = time.time() + (PAYMENT_TTL_MIN + 5) * 60
+
+
 async def tracker_loop(bot: Bot):
+    global _open_cache
     await asyncio.sleep(20)
     while True:
         try:
-            sigs = await db.open_signals()
+            if _open_cache is None:
+                _open_cache = list(await db.open_signals())
+            sigs = _open_cache
             if sigs:
                 async with aiohttp.ClientSession() as s:
                     for g in sigs:
@@ -348,17 +370,29 @@ async def handle_signal(bot: Bot, g, rows):
         await db.set_status(g["id"], "expired", True)
         msg = head + "⌛️ Signal closed because it expired."
     if msg:
+        invalidate_open()
         await broadcast(bot, await db.active_user_ids(), msg)
 
 
 async def payment_loop(bot: Bot):
+    watch_payments()  # after a restart, cover payments that were pending
     await asyncio.sleep(15)
+    quiet = 0
     while True:
         try:
-            await payments.process(bot)
+            if time.time() < _pay_until:
+                await payments.process(bot)
+                quiet = 0
+            elif quiet >= 4:  # safety net, hourly: late transfers, expiring old requests
+                await payments.process(bot)
+                quiet = 0
         except Exception:
             log.exception("payments")
-        await asyncio.sleep(45)
+        if time.time() < _pay_until:
+            await asyncio.sleep(45)
+        else:
+            await wake.tick()
+            quiet += 1
 
 
 async def main():
